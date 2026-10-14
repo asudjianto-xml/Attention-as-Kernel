@@ -132,3 +132,9 @@ Generated results, datasets, papers, and LaTeX sources are not included. Package
 ## Theoretical paper
 
 For the detailed theory, see Agus Sudjianto and Ming Yuan, *[Multilayer Cross-Attention as Iterated Kernel Smoothing](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=7611539)* (2026), SSRN working paper 7611539. The tutorial is authored by Agus Sudjianto.
+
+## Review checks
+
+The revised examples search synthetic depths through 1,024 and housing depths through 256, with wider bandwidth grids. Every selected setting at a grid boundary is recorded in `results.json`. Training compares validation-selected checkpoints at 250 and 1,000 updates along the same trajectories. The wider housing search selects an iterated-NW fit with worse test error than one-layer NW; the tutorial reports this result rather than assuming residual correction always helps.
+
+An independent review reproduced the earlier 250-update version to within 1e-9 in spark-venv with NumPy 2.2.6 and PyTorch 2.10. That cross-version check applies to the earlier run; the revised results record their own package versions in `results.json`.

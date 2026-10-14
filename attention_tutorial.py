@@ -129,28 +129,28 @@ def main():
             query_path.append(fq.copy())
         return np.array(context_path), np.array(query_path)
 
-    fc_path, fq_path = iterate(S, Q, yc, 128)
+    fc_path, fq_path = iterate(S, Q, yc, 1024)
     np.testing.assert_allclose(fq_path[0], Q @ yc, atol=1e-13)
     np.testing.assert_allclose(fq_path[1], Q @ (2*np.eye(len(X))-S) @ yc, atol=1e-13)
     # An independent matrix-power expression checks deeper updates.
     v = sum((np.linalg.matrix_power(np.eye(len(X))-S, j) @ yc for j in range(8)))
     np.testing.assert_allclose(fq_path[7], Q @ v, atol=1e-12)
     fig, ax = plt.subplots(1, 2, figsize=(9, 3))
-    for depth in [1, 4, 16, 128]:
+    for depth in [1, 4, 16, 1024]:
         ax[0].plot(Xgrid[:, 0], ybar+fq_path[depth-1], label=f'{depth} layers')
     ax[0].scatter(X[:, 0], y, s=10, color='gray'); ax[0].legend()
     ax[0].set(xlabel='Input', ylabel='Prediction')
-    ax[1].plot(np.arange(1, 129), np.sqrt(np.mean((yc-fc_path)**2, axis=1)))
+    ax[1].plot(np.arange(1, 1025), np.sqrt(np.mean((yc-fc_path)**2, axis=1)))
     ax[1].set(xlabel='Layers', ylabel='Context RMSE', xscale='log')
     plt.tight_layout(); savefig('depth')
 
-    depths = [1, 2, 4, 8, 16, 32, 64, 128]
-    temperatures = [0.08, 0.2, 0.5, 1.0, 2.0]
-    penalties = [0.001, 0.01, 0.1, 1.0]
-    _, val_path = iterate(S, weights(Xval, X, T), yc, 128)
+    depths = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+    temperatures = [0.02, 0.04, 0.08, 0.2, 0.5, 1.0, 2.0]
+    penalties = [0.00001, 0.0001, 0.001, 0.01, 0.1, 1.0]
+    _, val_path = iterate(S, weights(Xval, X, T), yc, 1024)
     plt.figure(figsize=(6, 3))
-    plt.plot(np.arange(1, 129), [rmse(yval, ybar+p) for p in val_path], label='Validation')
-    plt.plot(np.arange(1, 129), [rmse(y, ybar+p) for p in fc_path], label='Context')
+    plt.plot(np.arange(1, 1025), [rmse(yval, ybar+p) for p in val_path], label='Validation')
+    plt.plot(np.arange(1, 1025), [rmse(y, ybar+p) for p in fc_path], label='Context')
     plt.xlabel('Layers'); plt.ylabel('RMSE'); plt.xscale('log'); plt.legend()
     savefig('validation')
 
@@ -169,6 +169,13 @@ def main():
         'KRR': {'T': tk, 'penalty': lk, 'test_rmse': rmse(ytest, krr(X,Xtest,y,tk,lk))}}
     results['synthetic'] = synthetic
     print(json.dumps(synthetic, indent=2))
+    results['synthetic_grids'] = {'T': temperatures, 'depth': depths, 'penalty': penalties}
+    def grid_edges(parameters, grids):
+        return [f"{key}={value:g} ({'lower' if value == min(grids[key]) else 'upper'} edge)"
+                for key, value in parameters.items() if key in grids and value in (min(grids[key]), max(grids[key]))]
+    for name, row in synthetic.items():
+        row['grid_edges'] = grid_edges(row, results['synthetic_grids'])
+        print(name, 'grid edges:', row['grid_edges'] or 'none')
 
     degrees = K.sum(axis=1)
     A = K / np.sqrt(degrees[:, None]*degrees[None, :])
@@ -283,7 +290,8 @@ def main():
             best = float(mse_model(model, validation))
         state, best_step = copy.deepcopy(model.state_dict()), 0
         trace = [(0, best)]
-        for step in range(1, 251):
+        budget_states = {}
+        for step in range(1, 1001):
             episode = episodes(seed*10000+step, batch=16)
             optimizer.zero_grad()
             loss = mse_model(model, episode)
@@ -296,24 +304,34 @@ def main():
                 trace.append((step, val_loss))
                 if val_loss < best:
                     best, state, best_step = val_loss, copy.deepcopy(model.state_dict()), step
+            if step in (250, 1000):
+                budget_states[step] = (copy.deepcopy(state), best_step)
         model.load_state_dict(state)
         model.eval()
-        return model, trace, best_step
+        return model, trace, best_step, budget_states
 
-    models, traces, training_rows = {}, {}, []
+    models, traces, training_rows, budget_rows = {}, {}, [], []
     for seed in [1, 2, 3]:
         for name, init in [('NW initialization', True), ('Random initialization', False)]:
-            model, trace, step = train_one(seed, init)
+            model, trace, step, budget_states = train_one(seed, init)
             models[(name, seed)], traces[(name, seed)] = model, trace
             with torch.no_grad():
                 test_rmse = float(mse_model(model, test).sqrt())
             training_rows.append(dict(seed=seed, initialization=name, selected_step=step, test_rmse=test_rmse))
+            # Evaluate only validation-selected checkpoints, not every checkpoint on test data.
+            probe = copy.deepcopy(model)
+            for budget, (state, selected_step) in budget_states.items():
+                probe.load_state_dict(state)
+                with torch.no_grad():
+                    score = float(mse_model(probe, test).sqrt())
+                budget_rows.append(dict(seed=seed, initialization=name, budget=budget,
+                                       selected_step=selected_step, test_rmse=score))
     with torch.no_grad():
         baseline_rmse = float(mse_model(SmoothingNetwork(), test).sqrt())
     results['training'] = {'runs': training_rows, 'untrained_iterated_nw_rmse': baseline_rmse,
-                           'steps': 250, 'depth': 4, 'seeds': [1,2,3]}
+                           'steps': 1000, 'depth': 4, 'seeds': [1,2,3], 'budget_runs': budget_rows}
     print('Untrained four-layer NW:', baseline_rmse)
-    for row in training_rows:
+    for row in budget_rows:
         print(row)
     plt.figure(figsize=(7, 3))
     for name in ['NW initialization', 'Random initialization']:
@@ -360,12 +378,15 @@ def main():
         ym, ys = data.target[c].mean(), data.target[c].std()
         hy, hyv, hyt = ((data.target[idx]-ym)/ys for idx in [c,v,t])
         candidates = {'NW': [], 'Iterated NW': [], 'KRR': []}
-        for temp in [1., 4., 16., 64.]:
+        housing_grids = {'T': [0.25, 0.5, 1., 4., 16., 64., 256.],
+                         'depth': [1,2,4,8,16,32,64,128,256],
+                         'penalty': [.001,.01,.1,1.,10.]}
+        for temp in housing_grids['T']:
             hs, hq = weights(hx,hx,temp), weights(hv,hx,temp)
-            _, hp = iterate(hs,hq,hy-hy.mean(),32)
+            _, hp = iterate(hs,hq,hy-hy.mean(),max(housing_grids['depth']))
             candidates['NW'].append((rmse(hyv,hy.mean()+hp[0]),temp,1))
-            candidates['Iterated NW'].extend((rmse(hyv,hy.mean()+hp[d-1]),temp,d) for d in [1,2,4,8,16,32])
-            candidates['KRR'].extend((rmse(hyv,krr(hx,hv,hy,temp,lam)),temp,lam) for lam in [.01,.1,1.,10.])
+            candidates['Iterated NW'].extend((rmse(hyv,hy.mean()+hp[d-1]),temp,d) for d in housing_grids['depth'])
+            candidates['KRR'].extend((rmse(hyv,krr(hx,hv,hy,temp,lam)),temp,lam) for lam in housing_grids['penalty'])
         rows = {}
         for name, choices in candidates.items():
             score,temp,parameter = min(choices)
@@ -373,9 +394,13 @@ def main():
                 prediction = krr(hx,ht,hy,temp,parameter)
             else:
                 prediction = hy.mean()+iterate(weights(hx,hx,temp),weights(ht,hx,temp),hy-hy.mean(),int(parameter))[1][-1]
-            rows[name] = dict(T=temp, parameter=parameter, validation_rmse=score, test_rmse=rmse(hyt,prediction))
+            parameters = {'T': temp}
+            if name != 'NW':
+                parameters['penalty' if name == 'KRR' else 'depth'] = parameter
+            rows[name] = dict(T=temp, parameter=parameter, validation_rmse=score,
+                              test_rmse=rmse(hyt,prediction), grid_edges=grid_edges(parameters, housing_grids))
         housing = dict(status='completed', context=192, validation=192, test=384,
-                       target_units='context standard deviations', rows=rows)
+                       target_units='context standard deviations', rows=rows, grids=housing_grids)
         print(json.dumps(housing, indent=2))
     results['housing'] = housing
 
