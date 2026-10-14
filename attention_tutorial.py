@@ -137,6 +137,153 @@ def main():
         print(details[0][0][0, :, 3:].numpy().round(3))
         print('Standard block: weighted averages, invariance and gradient checks passed.')
 
+    # Inspect the actual standard transformer from the preceding cell.
+    # These are untrained representations, not fitted predictions.
+    from matplotlib.patches import FancyBboxPatch, Circle
+    from matplotlib.colors import ListedColormap
+
+    with torch.no_grad():
+        tf_mean = cy.mean(dim=1, keepdim=True)
+        tf_context = torch.stack([cx, cy-tf_mean, torch.ones_like(cx)], -1)
+        tf_queries = torch.stack([qx, torch.zeros_like(qx), torch.zeros_like(qx)], -1)
+        tf_tokens = standard_transformer.embedding(torch.cat([tf_context, tf_queries], dim=1))
+        tf_states = [tf_tokens[0].numpy().copy()]
+        tf_attentions = []
+        for tf_block in standard_transformer.blocks:
+            tf_tokens, tf_weights, _, _ = tf_block(tf_tokens, cx.shape[1])
+            tf_states.append(tf_tokens[0].numpy().copy())
+            tf_attentions.append(tf_weights[0].numpy().copy())
+        tf_prediction = tf_mean + standard_transformer.readout(tf_tokens[:, cx.shape[1]:]).squeeze(-1)
+        torch.testing.assert_close(tf_prediction, standard_transformer(cx, cy, qx)[0])
+        tf_first = standard_transformer.blocks[0]
+        tf_normalized = tf_first.norm_attention(torch.tensor(tf_states[0])[None])
+        tf_q = tf_first.split_heads(tf_first.q_map(tf_normalized))[0, 0, 3:4].numpy()
+        tf_k = tf_first.split_heads(tf_first.k_map(tf_normalized[:, :3]))[0, 0].numpy()
+        tf_v = tf_first.split_heads(tf_first.v_map(tf_normalized[:, :3]))[0, 0].numpy()
+        tf_scores = tf_q @ tf_k.T / tf_first.head_width**0.5
+        tf_a = np.exp(tf_scores-tf_scores.max())
+        tf_a /= tf_a.sum()
+        tf_o = tf_a @ tf_v
+    np.testing.assert_allclose(tf_a[0], tf_attentions[0][0, 3], atol=1e-12)
+    np.testing.assert_allclose(tf_o, sum(tf_a[0,i]*tf_v[i:i+1] for i in range(3)), atol=1e-12)
+
+    def annotated_matrix(ax, matrix, title, row_labels, col_labels, probability=False, limit=None):
+        bound = limit if limit is not None else max(float(np.abs(matrix).max()), 1e-8)
+        im = ax.imshow(matrix, cmap='YlGnBu' if probability else 'RdBu_r',
+                       vmin=0 if probability else -bound, vmax=1 if probability else bound,
+                       aspect='auto')
+        ax.set_title(title, fontsize=11, pad=10)
+        ax.set_xticks(range(len(col_labels)), col_labels, fontsize=9)
+        ax.set_yticks(range(len(row_labels)), row_labels, fontsize=9)
+        for (i,j), value in np.ndenumerate(matrix):
+            color = 'white' if (value > .65 if probability else abs(value) > .65*bound) else '#182b3a'
+            ax.text(j, i, f'{value:.2f}', ha='center', va='center', fontsize=9, color=color)
+        return im
+
+    # 1. Query/key projections -> scores -> weights -> value average.
+    fig, axes = plt.subplots(2, 3, figsize=(9, 4.8), constrained_layout=True)
+    features = ['1','2','3','4']
+    context_names = ['c1','c2','c3']
+    annotated_matrix(axes[0,0], tf_q, r'1. Query projection: $q$', ['q1'], features)
+    annotated_matrix(axes[0,1], tf_k, r'2. Key projections: $K$', context_names, features)
+    annotated_matrix(axes[0,2], tf_scores, r'3. Scores: $qK^T/\sqrt{d_k}$', ['q1'], context_names)
+    annotated_matrix(axes[1,0], tf_a, '4. Weights: softmax(scores)', ['q1'], context_names, probability=True)
+    annotated_matrix(axes[1,1], tf_v, r'5. Value projections: $V$', context_names, features)
+    annotated_matrix(axes[1,2], tf_o, r'6. Head output: $aV$', ['q1'], features)
+    fig.suptitle('One query, one head: inspect every part of the weighted average', fontsize=13)
+    savefig('transformer_qkv')
+
+    # 2. Allowed information flow and the actual weights implementing it.
+    fig, axes = plt.subplots(1, 2, figsize=(9, 4), constrained_layout=True)
+    allowed = np.zeros((5,5), dtype=int)
+    allowed[:3,:3] = 1
+    allowed[3:,:3] = 2
+    axes[0].imshow(allowed, cmap=ListedColormap(['#e2e6ea','#b9d7eb','#fed69a']), vmin=0, vmax=2)
+    for i in range(5):
+        for j in range(5):
+            axes[0].text(j,i,'self' if i<3 and j<3 else ('cross' if j<3 else 'blocked'),
+                         ha='center', va='center', fontsize=8)
+    axes[0].set_xticks(range(5), ['c1','c2','c3','q1','q2'])
+    axes[0].set_yticks(range(5), ['c1','c2','c3','q1','q2'])
+    axes[0].set_title('Who can supply information?')
+    axes[0].set_xlabel('Potential keys / values')
+    axes[0].set_ylabel('Tokens making queries')
+    axes[0].axhline(2.5,color='white',lw=2); axes[0].axvline(2.5,color='white',lw=2)
+    im=annotated_matrix(axes[1],tf_attentions[0][0], 'Actual weights: layer 1, head 1',
+                        ['c1','c2','c3','q1','q2'],context_names,probability=True)
+    axes[1].axhline(2.5,color='black',lw=1.5)
+    axes[1].set_xlabel('Context keys / values only')
+    fig.colorbar(im,ax=axes[1],label='Weight',shrink=.75)
+    savefig('transformer_context_query')
+
+    # 3. The exact pre-normalization block used in the notebook.
+    fig, ax = plt.subplots(figsize=(9, 4.7))
+    ax.set(xlim=(0,10),ylim=(0,5)); ax.axis('off')
+    def tf_box(x,y,text,width=1.45,height=.72,color='#e4eef7'):
+        ax.add_patch(FancyBboxPatch((x-width/2,y-height/2),width,height,
+                                   boxstyle='round,pad=0.05',facecolor=color,edgecolor='#29455d',lw=1.2))
+        ax.text(x,y,text,ha='center',va='center',fontsize=9)
+    def tf_arrow(start,end,color='#29455d'):
+        ax.annotate('',xy=end,xytext=start,arrowprops=dict(arrowstyle='->',lw=1.5,color=color))
+    def tf_add(x,y):
+        ax.add_patch(Circle((x,y),.22,facecolor='#fff0d9',edgecolor='#29455d',lw=1.2))
+        ax.text(x,y,'+',ha='center',va='center',fontsize=16)
+    tf_box(.9,3.45,'Old tokens\ncontext + query',width=1.5)
+    tf_box(2.65,3.45,'Layer norm',width=1.35)
+    tf_box(4.45,3.45,'Multi-head\nattention',width=1.65)
+    tf_box(6.5,3.45,'Concatenate\nthen project',width=1.6)
+    tf_add(8.5,3.45)
+    tf_arrow((1.7,3.45),(1.92,3.45)); tf_arrow((3.38,3.45),(3.55,3.45))
+    tf_arrow((5.33,3.45),(5.62,3.45)); tf_arrow((7.35,3.45),(8.24,3.45))
+    # First skip: the original tokens bypass all attention operations.
+    ax.plot([.9,.9,8.5],[3.88,4.55,4.55],color='#bf6a24',lw=1.5)
+    tf_arrow((8.5,4.55),(8.5,3.69),color='#bf6a24')
+    ax.text(4.8,4.68,'Attention skip: retain the old token state',ha='center',fontsize=10,color='#914816')
+    ax.text(4.45,2.65,'Queries: all tokens\nKeys and values: old context only',ha='center',fontsize=9)
+    tf_box(8.5,1.2,'Layer norm',width=1.35)
+    tf_box(6.5,1.2,'Feed-forward\nnetwork',width=1.6)
+    tf_add(3.9,1.2)
+    tf_box(1.55,1.2,'Updated tokens',width=1.7,color='#e3f1e5')
+    tf_arrow((8.5,3.20),(8.5,1.63)); tf_arrow((7.75,1.2),(7.35,1.2))
+    tf_arrow((5.65,1.2),(4.16,1.2)); tf_arrow((3.65,1.2),(2.46,1.2))
+    # Second skip carries the result of the attention residual addition.
+    ax.plot([8.5,3.9],[2.15,2.15],color='#bf6a24',lw=1.5)
+    tf_arrow((3.9,2.15),(3.9,1.44),color='#bf6a24')
+    ax.text(6.0,2.28,'Feed-forward skip',ha='center',fontsize=10,color='#914816')
+    ax.text(6.5,.48,'Transforms each token separately',ha='center',fontsize=9)
+    ax.text(1.55,.48,'Repeat for the next layer',ha='center',fontsize=9)
+    savefig('transformer_block')
+
+    # 4. Two heads can form different averages, and those weights can change by layer.
+    fig, axes = plt.subplots(2,2,figsize=(8,5.2),constrained_layout=True)
+    for layer in range(2):
+        for head in range(2):
+            im=annotated_matrix(axes[layer,head],tf_attentions[layer][head,3:],
+                                f'Layer {layer+1}, head {head+1}', ['q1','q2'],context_names,probability=True)
+            axes[layer,head].set_xlabel('Context keys')
+    fig.colorbar(im,ax=axes.ravel().tolist(),label='Attention weight',shrink=.8)
+    fig.suptitle('Query-to-context attention in the untrained standard transformer',fontsize=12)
+    savefig('transformer_heads')
+
+    # 5. Token vectors after embedding and after each complete block.
+    fig, axes = plt.subplots(2,3,figsize=(10,5.2),constrained_layout=True)
+    for group, rows in enumerate([slice(0,3),slice(3,5)]):
+        state_limit=max(float(np.abs(state[rows]).max()) for state in tf_states)
+        for layer in range(3):
+            ax=axes[group,layer]
+            im=ax.imshow(tf_states[layer][rows],cmap='RdBu_r',vmin=-state_limit,vmax=state_limit,aspect='auto')
+            if group==0:
+                ax.set_title('After embedding' if layer==0 else f'After block {layer}')
+            ax.set_xticks(range(8),range(1,9))
+            names=['c1','c2','c3'] if group==0 else ['q1','q2']
+            ax.set_yticks(range(len(names)),names)
+            ax.set_xlabel('Token coordinate')
+            if layer==0:
+                ax.set_ylabel('Context tokens' if group==0 else 'Query tokens')
+        fig.colorbar(im,ax=axes[group,:].tolist(),label='Context scale' if group==0 else 'Query scale',shrink=.85)
+    fig.suptitle('Token states across blocks: a shared scale within each row of panels',fontsize=12)
+    savefig('transformer_states')
+
     rng = np.random.default_rng(17)
     def truth(x):
         return np.sin(2.5*x[:, 0]) + 0.35*np.cos(5*x[:, 0])

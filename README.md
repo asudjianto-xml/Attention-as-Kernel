@@ -128,7 +128,7 @@ Query labels never enter prediction tokens. Preprocessing and context centering 
 | `execute_notebook.py` | Runs the notebook from a fresh kernel and saves an executed copy |
 | `requirements.txt` | Python dependencies |
 
-Generated results, datasets, papers, and LaTeX sources are not included. Package versions and elapsed runtime are recorded in each run's `results.json`. Dependency versions are not locked; small numerical differences between environments are possible. The tutorial was tested with NumPy 2.4.6, PyTorch 2.12.0 (CPU execution), Matplotlib 3.11.1, and scikit-learn 1.9.0.
+The notebook includes executed plots for viewing on GitHub. Separate generated result files, datasets, papers and LaTeX sources are not included. Package versions and elapsed runtime are recorded in each run's `results.json`. Dependency versions are not locked; small numerical differences between environments are possible. The tutorial was tested with NumPy 2.4.6, PyTorch 2.12.0 (CPU execution), Matplotlib 3.11.1, and scikit-learn 1.9.0.
 
 ## Theoretical paper
 
@@ -145,3 +145,9 @@ An independent review reproduced the earlier 250-update version to within 1e-9 i
 `CrossAttentionTransformer` demonstrates standard multi-head dot-product attention, output projections, layer normalization, feed-forward networks and skip connections. Context tokens supply keys and values; both context and new-input tokens supply queries. The code checks the averages and gradients, but does not train or benchmark this full block.
 
 `SmoothingNetwork` is a restricted attention model without layer normalization or a feed-forward network. Its initial weights compute residual NW exactly. The initialization comparisons use this restricted model. They are not performance results for the standard block. Both examples are context/query models for unordered regression rows, not autoregressive language-model decoders.
+
+## Transformer figures
+
+The notebook and script generate five transformer figures: the query–key–value calculation, allowed context/query attention, a full pre-normalization block, attention weights by head and layer, and token states across layers. The numerical plots use the actual untrained standard transformer in the notebook. They explain the computation and are not evidence of fitted prediction quality. The figures are saved under `figures/` inside the configured output directory.
+
+The notebook includes the executed figures, so they can be viewed on GitHub without running Python. Re-running the cells regenerates them from the model.
