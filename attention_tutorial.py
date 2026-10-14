@@ -54,6 +54,209 @@ def main():
     print('Weighted label average:', attention_weights @ values)
     print('Same weights, different values:', attention_weights @ np.array([1., -2., 3.]))
 
+    # Two projected queries, three projected keys and two value coordinates.
+    bridge_queries = np.array([[1., 0.], [0., 1.]])
+    bridge_keys = np.array([[np.sqrt(2)*np.log(6), 0.2],
+                            [np.sqrt(2)*np.log(3), 0.5], [0., -0.3]])
+    bridge_values = np.array([[10., 1.], [20., -2.], [40., 3.]])
+    bridge_scores = bridge_queries @ bridge_keys.T / np.sqrt(bridge_keys.shape[1])
+
+    # Form 1: standard dot-product attention, implemented in PyTorch.
+    bridge_attention = torch.softmax(torch.tensor(bridge_scores), dim=-1).numpy()
+    bridge_attention_output = bridge_attention @ bridge_values
+
+    # Form 2: the same operation as a normalized positive-kernel sum.
+    bridge_kernel = np.exp(bridge_scores)
+    bridge_kernel_weights = bridge_kernel / bridge_kernel.sum(axis=1, keepdims=True)
+    bridge_kernel_output = (bridge_kernel @ bridge_values) / bridge_kernel.sum(axis=1, keepdims=True)
+    np.testing.assert_allclose(bridge_attention, bridge_kernel_weights, atol=1e-14)
+    np.testing.assert_allclose(bridge_attention_output, bridge_kernel_output, atol=1e-14)
+    np.testing.assert_allclose(bridge_attention[0], [0.6,0.3,0.1], atol=1e-14)
+    np.testing.assert_allclose(bridge_attention_output[0], [16.,0.3], atol=1e-14)
+    print('Attention output:\n', bridge_attention_output)
+    print('Kernel smoother output:\n', bridge_kernel_output)
+    print('Maximum difference:', np.abs(bridge_attention_output-bridge_kernel_output).max())
+
+    fig, axes = plt.subplots(1,3,figsize=(10,3.1),constrained_layout=True)
+    for ax, matrix, title in zip(axes[:2], [bridge_attention,bridge_kernel_weights],
+            ['Softmax of dot-product scores', 'Normalized exponential kernel']):
+        im=ax.imshow(matrix,vmin=0,vmax=1,cmap='YlGnBu',aspect='auto')
+        for (i,j), value in np.ndenumerate(matrix):
+            ax.text(j,i,f'{value:.3f}',ha='center',va='center',fontsize=11)
+        ax.set_xticks(range(3),['key 1','key 2','key 3'])
+        ax.set_yticks(range(2),['query 1','query 2'])
+        ax.set_title(title,fontsize=11)
+    positions=np.arange(2)
+    axes[2].bar(positions-.16,bridge_attention_output[:,0],width=.32,label='Attention')
+    axes[2].bar(positions+.16,bridge_kernel_output[:,0],width=.32,label='Kernel sum')
+    axes[2].set_xticks(positions,['query 1','query 2'])
+    axes[2].set_title('Same weighted label average',fontsize=11)
+    axes[2].set_ylabel('Output, first value coordinate')
+    axes[2].legend(fontsize=9)
+    savefig('attention_kernel_identity')
+
+    bridge_labels = np.array([10.,20.,40.])
+    bridge_current_fit = np.array([12.,18.,35.])
+    bridge_residuals = bridge_labels-bridge_current_fit
+    bridge_weights = bridge_attention[0].copy()
+    bridge_label_output = bridge_weights @ bridge_labels
+    bridge_feature_output = bridge_weights @ bridge_values
+    bridge_residual_output = bridge_weights @ bridge_residuals
+    np.testing.assert_allclose(bridge_label_output,16.)
+    np.testing.assert_allclose(bridge_feature_output,[16.,0.3])
+    np.testing.assert_allclose(bridge_residual_output,-0.1,atol=1e-14)
+    np.testing.assert_allclose(bridge_weights,bridge_attention[0])
+    print('Fixed weights:',bridge_weights)
+    print('Labels -> prediction:',bridge_label_output)
+    print('Feature vectors -> feature average:',bridge_feature_output)
+    print('Residuals -> correction:',bridge_residual_output)
+
+    def normalized_scores(scores):
+        exponentials=np.exp(scores-scores.max(axis=-1,keepdims=True))
+        return exponentials/exponentials.sum(axis=-1,keepdims=True)
+
+    bridge_temperature=2*np.sqrt(bridge_keys.shape[1])
+    bridge_distance_scores=-np.sum((bridge_queries[:,None,:]-bridge_keys[None,:,:])**2,axis=-1)/bridge_temperature
+    bridge_biased_scores=bridge_scores-np.sum(bridge_keys**2,axis=1)[None,:]/bridge_temperature
+    bridge_gaussian_attention=normalized_scores(bridge_distance_scores)
+    np.testing.assert_allclose(bridge_gaussian_attention,normalized_scores(bridge_biased_scores),atol=1e-14)
+    assert not np.allclose(bridge_gaussian_attention,bridge_attention)
+    print('Dot-product weights for query 1:',bridge_attention[0])
+    print('Gaussian weights for query 1:',bridge_gaussian_attention[0])
+    print('Same values, different output:',bridge_gaussian_attention[0] @ bridge_values)
+
+    bridge_unit_keys=bridge_keys/np.linalg.norm(bridge_keys,axis=1,keepdims=True)
+    bridge_unit_dot=bridge_queries @ bridge_unit_keys.T/np.sqrt(bridge_keys.shape[1])
+    bridge_unit_distance=-np.sum((bridge_queries[:,None,:]-bridge_unit_keys[None,:,:])**2,axis=-1)/bridge_temperature
+    np.testing.assert_allclose(normalized_scores(bridge_unit_dot),normalized_scores(bridge_unit_distance),atol=1e-14)
+
+    rng = np.random.default_rng(17)
+    def truth(x):
+        return np.sin(2.5*x[:, 0]) + 0.35*np.cos(5*x[:, 0])
+    def sample(n):
+        x = rng.uniform(-2, 2, size=(n, 1))
+        return x, truth(x) + rng.normal(0, 0.18, n)
+    X, y = sample(48)
+    Xval, yval = sample(160)
+    Xtest, ytest = sample(240)
+    Xgrid = np.linspace(-2.2, 2.2, 400)[:, None]
+    ybar = y.mean()
+    yc = y - ybar
+    plt.figure(figsize=(7, 3))
+    plt.scatter(X[:, 0], y, s=20, label='Context labels')
+    plt.plot(Xgrid[:, 0], truth(Xgrid), color='black', label='Noise-free curve')
+    plt.xlabel('Input'); plt.ylabel('Response'); plt.legend()
+    savefig('data')
+
+    def logits(a, b, T):
+        return -np.sum((a[:, None, :] - b[None, :, :])**2, axis=-1) / T
+
+    def softmax_rows(z):
+        e = np.exp(z - z.max(axis=-1, keepdims=True))
+        return e / e.sum(axis=-1, keepdims=True)
+
+    def kernel(a, b, T):
+        return np.exp(logits(a, b, T))
+
+    def weights(a, b, T):
+        return softmax_rows(logits(a, b, T))
+
+    T = 0.5
+    G = kernel(X, X, T)
+    A_context = weights(X, X, T)
+    A_query = weights(Xgrid, X, T)
+    np.testing.assert_allclose(A_context.sum(axis=1), 1)
+    np.testing.assert_allclose(ybar + A_query @ yc, A_query @ y)
+    # The Gaussian/dot-product-with-bias identity also holds on these regression inputs.
+    dot_scores = 2 * Xgrid @ X.T / T - np.sum(X**2, axis=1)[None, :] / T
+    np.testing.assert_allclose(softmax_rows(dot_scores), A_query, atol=2e-14)
+    fig, ax = plt.subplots(1,2,figsize=(9,3.4),constrained_layout=True)
+    order=np.argsort(X[:,0])
+    for query in [-1.2,0.,1.2]:
+        row=weights(np.array([[query]]),X,T)[0]
+        ax[0].plot(X[order,0],row[order],marker='.',label=f'Query {query:g}')
+    ax[0].set(xlabel='Context input',ylabel='Attention weight'); ax[0].legend()
+    ax[1].scatter(X[:,0],y,s=14,color='gray',label='Context labels')
+    ax[1].plot(Xgrid[:,0],truth(Xgrid),'k--',label='Noise-free curve')
+    ax[1].plot(Xgrid[:,0],ybar+A_query@yc,label='Weighted label average')
+    ax[1].set(xlabel='Query input',ylabel='Prediction'); ax[1].legend(fontsize=8)
+    savefig('nw_attention')
+
+    def iterate(A_context, A_query, centered_labels, depth, eta=1.0):
+        fc = np.zeros_like(centered_labels)
+        fq = np.zeros(A_query.shape[0])
+        context_path, query_path = [], []
+        for _ in range(depth):
+            residual = centered_labels - fc  # read before either update
+            fc = fc + eta * (A_context @ residual)
+            fq = fq + eta * (A_query @ residual)
+            context_path.append(fc.copy())
+            query_path.append(fq.copy())
+        return np.array(context_path), np.array(query_path)
+
+    fc_path, fq_path = iterate(A_context, A_query, yc, 1024)
+    np.testing.assert_allclose(fq_path[0], A_query @ yc, atol=1e-13)
+    np.testing.assert_allclose(fq_path[1], A_query @ (2*np.eye(len(X))-A_context) @ yc, atol=1e-13)
+    # An independent matrix-power expression checks deeper updates.
+    v = sum((np.linalg.matrix_power(np.eye(len(X))-A_context, j) @ yc for j in range(8)))
+    np.testing.assert_allclose(fq_path[7], A_query @ v, atol=1e-12)
+    fig, ax = plt.subplots(1, 2, figsize=(9, 3))
+    for depth in [1, 4, 16, 1024]:
+        ax[0].plot(Xgrid[:, 0], ybar+fq_path[depth-1], label=f'{depth} layers')
+    ax[0].scatter(X[:, 0], y, s=10, color='gray'); ax[0].legend()
+    ax[0].set(xlabel='Input', ylabel='Prediction')
+    ax[1].plot(np.arange(1, 1025), np.sqrt(np.mean((yc-fc_path)**2, axis=1)))
+    ax[1].set(xlabel='Layers', ylabel='Context RMSE', xscale='log')
+    plt.tight_layout(); savefig('depth')
+
+    class SmoothingLayer(nn.Module):
+        def __init__(self, nw_init=True, T=0.5):
+            super().__init__()
+            self.q = nn.Linear(3, 2, bias=False)
+            self.k = nn.Linear(3, 2, bias=False)
+            self.v = nn.Linear(3, 1, bias=False)
+            self.T = T
+            if nw_init:
+                with torch.no_grad():
+                    self.q.weight.zero_(); self.k.weight.zero_()
+                    self.q.weight[0, 0] = 1; self.k.weight[0, 0] = 1
+                    self.v.weight.copy_(torch.tensor([[0., 1., -1.]]))
+
+        def forward(self, context, query):
+            old_keys, old_values = self.k(context), self.v(context)
+            def update(tokens):
+                projected = self.q(tokens)
+                scores = -((projected[:, :, None, :] - old_keys[:, None, :, :])**2).sum(-1)/self.T
+                correction = scores.softmax(-1) @ old_values
+                return torch.cat([tokens[..., :2], tokens[..., 2:3]+correction], dim=-1)
+            return update(context), update(query)
+
+    class SmoothingNetwork(nn.Module):
+        def __init__(self, depth=4, nw_init=True):
+            super().__init__()
+            self.layers = nn.ModuleList([SmoothingLayer(nw_init) for _ in range(depth)])
+        def forward(self, xc, labels, xq):
+            mean = labels.mean(dim=1, keepdim=True)
+            centered = labels-mean
+            context = torch.stack([xc, centered, torch.zeros_like(xc)], dim=-1)
+            query = torch.stack([xq, torch.zeros_like(xq), torch.zeros_like(xq)], dim=-1)
+            for layer in self.layers:
+                context, query = layer(context, query)
+            return mean + query[..., 2]
+
+    net = SmoothingNetwork()
+    with torch.no_grad():
+        pred = net(torch.tensor(X[:, 0])[None], torch.tensor(y)[None], torch.tensor(Xgrid[:, 0])[None])[0].numpy()
+    np.testing.assert_allclose(pred, ybar+fq_path[3], atol=1e-12)
+    # Context order and query batch composition must not change the prediction.
+    perm = np.random.default_rng(5).permutation(len(X))
+    with torch.no_grad():
+        reordered = net(torch.tensor(X[perm, 0])[None], torch.tensor(y[perm])[None], torch.tensor(Xgrid[:, 0])[None])[0].numpy()
+        alone = net(torch.tensor(X[:, 0])[None], torch.tensor(y)[None], torch.tensor(Xgrid[:1, 0])[None])[0].numpy()
+    np.testing.assert_allclose(reordered, pred, atol=1e-12)
+    np.testing.assert_allclose(alone, pred[:1], atol=1e-12)
+    print('Token network equals four residual NW updates; masking and ordering checks passed.')
+
     class CrossAttentionBlock(nn.Module):
         def __init__(self, width=8, heads=2):
             super().__init__()
@@ -284,215 +487,6 @@ def main():
     fig.suptitle('Token states across blocks: a shared scale within each row of panels',fontsize=12)
     savefig('transformer_states')
 
-    rng = np.random.default_rng(17)
-    def truth(x):
-        return np.sin(2.5*x[:, 0]) + 0.35*np.cos(5*x[:, 0])
-    def sample(n):
-        x = rng.uniform(-2, 2, size=(n, 1))
-        return x, truth(x) + rng.normal(0, 0.18, n)
-    X, y = sample(48)
-    Xval, yval = sample(160)
-    Xtest, ytest = sample(240)
-    Xgrid = np.linspace(-2.2, 2.2, 400)[:, None]
-    ybar = y.mean()
-    yc = y - ybar
-    plt.figure(figsize=(7, 3))
-    plt.scatter(X[:, 0], y, s=20, label='Context labels')
-    plt.plot(Xgrid[:, 0], truth(Xgrid), color='black', label='Noise-free curve')
-    plt.xlabel('Input'); plt.ylabel('Response'); plt.legend()
-    savefig('data')
-
-    def logits(a, b, T):
-        return -np.sum((a[:, None, :] - b[None, :, :])**2, axis=-1) / T
-
-    def softmax_rows(z):
-        e = np.exp(z - z.max(axis=-1, keepdims=True))
-        return e / e.sum(axis=-1, keepdims=True)
-
-    def kernel(a, b, T):
-        return np.exp(logits(a, b, T))
-
-    def weights(a, b, T):
-        # Subtracting the row maximum prevents exponential underflow.
-        return softmax_rows(logits(a, b, T))
-
-    def krr(a, b, labels, T, lam):
-        mean = labels.mean()
-        alpha = np.linalg.solve(kernel(a, a, T) + lam*np.eye(len(a)), labels-mean)
-        return mean + kernel(b, a, T) @ alpha
-
-    T = 0.5  # fixed for the explanatory figures
-    K = kernel(X, X, T)
-    S = weights(X, X, T)
-    Q = weights(Xgrid, X, T)
-    assert np.linalg.eigvalsh(K).min() > -1e-10
-    np.testing.assert_allclose(S.sum(axis=1), 1)
-    np.testing.assert_allclose(ybar + Q @ yc, Q @ y)
-    fig, ax = plt.subplots(1, 2, figsize=(9, 3))
-    order = np.argsort(X[:, 0])
-    im = ax[0].imshow(S[np.ix_(order, order)], aspect='auto', cmap='viridis')
-    fig.colorbar(im, ax=ax[0], label='Attention weight')
-    ax[0].set(xlabel='Context key (sorted)', ylabel='Context query (sorted)')
-    ax[1].scatter(X[:, 0], y, s=12, color='gray')
-    ax[1].plot(Xgrid[:, 0], truth(Xgrid), 'k--', label='Truth')
-    ax[1].plot(Xgrid[:, 0], krr(X, Xgrid, y, T, .1), label='KRR, penalty 0.1')
-    ax[1].plot(Xgrid[:, 0], ybar+Q@yc, label='NW')
-    ax[1].set(xlabel='Input', ylabel='Prediction'); ax[1].legend()
-    plt.tight_layout(); savefig('krr_nw')
-
-    dot_scores = 2 * Xgrid @ X.T / T - np.sum(X**2, axis=1)[None, :] / T
-    Qdot = softmax_rows(dot_scores)
-    np.testing.assert_allclose(Qdot, Q, atol=2e-14)
-    np.testing.assert_allclose(ybar + Qdot @ yc, ybar + Q @ yc, atol=2e-14)
-    print('Gaussian scores and biased dot-product scores agree.')
-
-    def iterate(S, Q, centered_labels, depth, eta=1.0):
-        fc = np.zeros_like(centered_labels)
-        fq = np.zeros(Q.shape[0])
-        context_path, query_path = [], []
-        for _ in range(depth):
-            residual = centered_labels - fc  # read before either update
-            fc = fc + eta * (S @ residual)
-            fq = fq + eta * (Q @ residual)
-            context_path.append(fc.copy())
-            query_path.append(fq.copy())
-        return np.array(context_path), np.array(query_path)
-
-    fc_path, fq_path = iterate(S, Q, yc, 1024)
-    np.testing.assert_allclose(fq_path[0], Q @ yc, atol=1e-13)
-    np.testing.assert_allclose(fq_path[1], Q @ (2*np.eye(len(X))-S) @ yc, atol=1e-13)
-    # An independent matrix-power expression checks deeper updates.
-    v = sum((np.linalg.matrix_power(np.eye(len(X))-S, j) @ yc for j in range(8)))
-    np.testing.assert_allclose(fq_path[7], Q @ v, atol=1e-12)
-    fig, ax = plt.subplots(1, 2, figsize=(9, 3))
-    for depth in [1, 4, 16, 1024]:
-        ax[0].plot(Xgrid[:, 0], ybar+fq_path[depth-1], label=f'{depth} layers')
-    ax[0].scatter(X[:, 0], y, s=10, color='gray'); ax[0].legend()
-    ax[0].set(xlabel='Input', ylabel='Prediction')
-    ax[1].plot(np.arange(1, 1025), np.sqrt(np.mean((yc-fc_path)**2, axis=1)))
-    ax[1].set(xlabel='Layers', ylabel='Context RMSE', xscale='log')
-    plt.tight_layout(); savefig('depth')
-
-    depths = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
-    temperatures = [0.02, 0.04, 0.08, 0.2, 0.5, 1.0, 2.0]
-    penalties = [0.00001, 0.0001, 0.001, 0.01, 0.1, 1.0]
-    _, val_path = iterate(S, weights(Xval, X, T), yc, 1024)
-    plt.figure(figsize=(6, 3))
-    plt.plot(np.arange(1, 1025), [rmse(yval, ybar+p) for p in val_path], label='Validation')
-    plt.plot(np.arange(1, 1025), [rmse(y, ybar+p) for p in fc_path], label='Context')
-    plt.xlabel('Layers'); plt.ylabel('RMSE'); plt.xscale('log'); plt.legend()
-    savefig('validation')
-
-    nw_candidates, it_candidates, kr_candidates = [], [], []
-    for temp in temperatures:
-        _, path = iterate(weights(X, X, temp), weights(Xval, X, temp), yc, max(depths))
-        nw_candidates.append((rmse(yval, ybar+path[0]), temp))
-        it_candidates.extend((rmse(yval, ybar+path[d-1]), temp, d) for d in depths)
-        kr_candidates.extend((rmse(yval, krr(X, Xval, y, temp, lam)), temp, lam) for lam in penalties)
-    _, tn = min(nw_candidates)
-    _, ti, di = min(it_candidates)
-    _, tk, lk = min(kr_candidates)
-    synthetic = {
-        'NW': {'T': tn, 'test_rmse': rmse(ytest, ybar+weights(Xtest, X, tn)@yc)},
-        'Iterated NW': {'T': ti, 'depth': di, 'test_rmse': rmse(ytest, ybar+iterate(weights(X,X,ti), weights(Xtest,X,ti), yc, di)[1][-1])},
-        'KRR': {'T': tk, 'penalty': lk, 'test_rmse': rmse(ytest, krr(X,Xtest,y,tk,lk))}}
-    results['synthetic'] = synthetic
-    print(json.dumps(synthetic, indent=2))
-    results['synthetic_grids'] = {'T': temperatures, 'depth': depths, 'penalty': penalties}
-    def grid_edges(parameters, grids):
-        return [f"{key}={value:g} ({'lower' if value == min(grids[key]) else 'upper'} edge)"
-                for key, value in parameters.items() if key in grids and value in (min(grids[key]), max(grids[key]))]
-    for name, row in synthetic.items():
-        row['grid_edges'] = grid_edges(row, results['synthetic_grids'])
-        print(name, 'grid edges:', row['grid_edges'] or 'none')
-
-    degrees = K.sum(axis=1)
-    A = K / np.sqrt(degrees[:, None]*degrees[None, :])
-    eig = np.linalg.eigvalsh(A)
-    assert eig.min() > -1e-12 and eig.max() <= 1+1e-12
-    Sbad = np.array([[0.1, 0.9], [0.9, 0.1]])
-    Sasym = np.array([[0.1, 0.9], [0.8, 0.2]])
-    np.testing.assert_allclose(softmax_rows(np.log(Sbad)), Sbad)
-    r0 = np.array([1., -1.])
-    fig, ax = plt.subplots(1, 2, figsize=(9, 3))
-    s = np.linspace(0, 1, 300)
-    for d in [1, 4, 16, 64]:
-        ax[0].plot(s, 1-(1-s)**d, label=f'{d} layers')
-    ax[0].set(xlabel='Eigenvalue', ylabel='Fraction fitted'); ax[0].legend()
-    for name, mat in [('Symmetric, non-PSD', Sbad), ('Asymmetric', Sasym)]:
-        residuals = [np.linalg.norm(np.linalg.matrix_power(np.eye(2)-mat, l)@r0) for l in range(16)]
-        ax[1].semilogy(range(16), residuals, label=name)
-    ax[1].set(xlabel='Layers', ylabel='Residual norm'); ax[1].legend()
-    plt.tight_layout(); savefig('stability')
-    print('Non-PSD eigenvalues:', np.linalg.eigvals(Sbad))
-    print('Asymmetric eigenvalues:', np.linalg.eigvals(Sasym))
-
-    Xi = np.array([[-1.5], [-0.4], [0.2], [1.4]])
-    yi = np.array([1.0, -0.5, 0.8, -0.2])
-    mi, ci = yi.mean(), yi-yi.mean()
-    Ki = kernel(Xi, Xi, 0.5)
-    diag = Ki.sum(axis=1)
-    Si = weights(Xi, Xi, 0.5)
-    Xqi = np.linspace(-2, 2, 100)[:, None]
-    Qi = weights(Xqi, Xi, 0.5)
-    limit = mi + Qi @ np.linalg.solve(Si, ci)
-    ridgeless = mi + kernel(Xqi, Xi, 0.5) @ np.linalg.solve(Ki, ci)
-    np.testing.assert_allclose(mi + Si @ np.linalg.solve(Si, ci), yi)
-    np.testing.assert_allclose(mi + Ki @ np.linalg.solve(Ki, ci), yi)
-    assert np.max(np.abs(limit-ridgeless)) > 0.01
-    _, ip = iterate(Si, Qi, ci, 300)
-    np.testing.assert_allclose(mi+ip[-1], limit, atol=1e-10)
-    print('Condition number:', np.linalg.cond(Ki))
-    print('Largest query difference:', np.max(np.abs(limit-ridgeless)))
-
-    class SmoothingLayer(nn.Module):
-        def __init__(self, nw_init=True, T=0.5):
-            super().__init__()
-            self.q = nn.Linear(3, 2, bias=False)
-            self.k = nn.Linear(3, 2, bias=False)
-            self.v = nn.Linear(3, 1, bias=False)
-            self.T = T
-            if nw_init:
-                with torch.no_grad():
-                    self.q.weight.zero_(); self.k.weight.zero_()
-                    self.q.weight[0, 0] = 1; self.k.weight[0, 0] = 1
-                    self.v.weight.copy_(torch.tensor([[0., 1., -1.]]))
-
-        def forward(self, context, query):
-            old_keys, old_values = self.k(context), self.v(context)
-            def update(tokens):
-                projected = self.q(tokens)
-                scores = -((projected[:, :, None, :] - old_keys[:, None, :, :])**2).sum(-1)/self.T
-                correction = scores.softmax(-1) @ old_values
-                return torch.cat([tokens[..., :2], tokens[..., 2:3]+correction], dim=-1)
-            return update(context), update(query)
-
-    class SmoothingNetwork(nn.Module):
-        def __init__(self, depth=4, nw_init=True):
-            super().__init__()
-            self.layers = nn.ModuleList([SmoothingLayer(nw_init) for _ in range(depth)])
-        def forward(self, xc, labels, xq):
-            mean = labels.mean(dim=1, keepdim=True)
-            centered = labels-mean
-            context = torch.stack([xc, centered, torch.zeros_like(xc)], dim=-1)
-            query = torch.stack([xq, torch.zeros_like(xq), torch.zeros_like(xq)], dim=-1)
-            for layer in self.layers:
-                context, query = layer(context, query)
-            return mean + query[..., 2]
-
-    net = SmoothingNetwork()
-    with torch.no_grad():
-        pred = net(torch.tensor(X[:, 0])[None], torch.tensor(y)[None], torch.tensor(Xgrid[:, 0])[None])[0].numpy()
-    np.testing.assert_allclose(pred, ybar+fq_path[3], atol=1e-12)
-    # Context order and query batch composition must not change the prediction.
-    perm = np.random.default_rng(5).permutation(len(X))
-    with torch.no_grad():
-        reordered = net(torch.tensor(X[perm, 0])[None], torch.tensor(y[perm])[None], torch.tensor(Xgrid[:, 0])[None])[0].numpy()
-        alone = net(torch.tensor(X[:, 0])[None], torch.tensor(y)[None], torch.tensor(Xgrid[:1, 0])[None])[0].numpy()
-    np.testing.assert_allclose(reordered, pred, atol=1e-12)
-    np.testing.assert_allclose(alone, pred[:1], atol=1e-12)
-    print('Token network equals four residual NW updates; masking and ordering checks passed.')
-
     def episodes(seed, batch=32, n=20, m=20):
         gen = np.random.default_rng(seed)
         xc = gen.uniform(-2, 2, (batch, n))
@@ -589,6 +583,96 @@ def main():
         rows = [d for d in diagnostics if d['initialization']==name]
         print(name, {k: round(float(np.mean([r[k] for r in rows])), 4)
                      for k in ['test_rmse','shuffled_rmse','prediction_change','departure_from_nw']})
+
+    def krr(a, b, labels, T, lam):
+        mean = labels.mean()
+        alpha = np.linalg.solve(kernel(a, a, T) + lam*np.eye(len(a)), labels-mean)
+        return mean + kernel(b, a, T) @ alpha
+
+    assert np.linalg.eigvalsh(G).min() > -1e-10
+    fig, ax = plt.subplots(1, 2, figsize=(9, 3))
+    order = np.argsort(X[:, 0])
+    im = ax[0].imshow(A_context[np.ix_(order, order)], aspect='auto', cmap='viridis')
+    fig.colorbar(im, ax=ax[0], label='Attention weight')
+    ax[0].set(xlabel='Context key (sorted)', ylabel='Context query (sorted)')
+    ax[1].scatter(X[:, 0], y, s=12, color='gray')
+    ax[1].plot(Xgrid[:, 0], truth(Xgrid), 'k--', label='Truth')
+    ax[1].plot(Xgrid[:, 0], krr(X, Xgrid, y, T, .1), label='KRR, penalty 0.1')
+    ax[1].plot(Xgrid[:, 0], ybar+A_query@yc, label='NW')
+    ax[1].set(xlabel='Input', ylabel='Prediction'); ax[1].legend()
+    plt.tight_layout(); savefig('krr_nw')
+
+    depths = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+    temperatures = [0.02, 0.04, 0.08, 0.2, 0.5, 1.0, 2.0]
+    penalties = [0.00001, 0.0001, 0.001, 0.01, 0.1, 1.0]
+    _, val_path = iterate(A_context, weights(Xval, X, T), yc, 1024)
+    plt.figure(figsize=(6, 3))
+    plt.plot(np.arange(1, 1025), [rmse(yval, ybar+p) for p in val_path], label='Validation')
+    plt.plot(np.arange(1, 1025), [rmse(y, ybar+p) for p in fc_path], label='Context')
+    plt.xlabel('Layers'); plt.ylabel('RMSE'); plt.xscale('log'); plt.legend()
+    savefig('validation')
+
+    nw_candidates, it_candidates, kr_candidates = [], [], []
+    for temp in temperatures:
+        _, path = iterate(weights(X, X, temp), weights(Xval, X, temp), yc, max(depths))
+        nw_candidates.append((rmse(yval, ybar+path[0]), temp))
+        it_candidates.extend((rmse(yval, ybar+path[d-1]), temp, d) for d in depths)
+        kr_candidates.extend((rmse(yval, krr(X, Xval, y, temp, lam)), temp, lam) for lam in penalties)
+    _, tn = min(nw_candidates)
+    _, ti, di = min(it_candidates)
+    _, tk, lk = min(kr_candidates)
+    synthetic = {
+        'NW': {'T': tn, 'test_rmse': rmse(ytest, ybar+weights(Xtest, X, tn)@yc)},
+        'Iterated NW': {'T': ti, 'depth': di, 'test_rmse': rmse(ytest, ybar+iterate(weights(X,X,ti), weights(Xtest,X,ti), yc, di)[1][-1])},
+        'KRR': {'T': tk, 'penalty': lk, 'test_rmse': rmse(ytest, krr(X,Xtest,y,tk,lk))}}
+    results['synthetic'] = synthetic
+    print(json.dumps(synthetic, indent=2))
+    results['synthetic_grids'] = {'T': temperatures, 'depth': depths, 'penalty': penalties}
+    def grid_edges(parameters, grids):
+        return [f"{key}={value:g} ({'lower' if value == min(grids[key]) else 'upper'} edge)"
+                for key, value in parameters.items() if key in grids and value in (min(grids[key]), max(grids[key]))]
+    for name, row in synthetic.items():
+        row['grid_edges'] = grid_edges(row, results['synthetic_grids'])
+        print(name, 'grid edges:', row['grid_edges'] or 'none')
+
+    degrees = G.sum(axis=1)
+    B = G / np.sqrt(degrees[:, None]*degrees[None, :])
+    eig = np.linalg.eigvalsh(B)
+    assert eig.min() > -1e-12 and eig.max() <= 1+1e-12
+    A_bad = np.array([[0.1, 0.9], [0.9, 0.1]])
+    A_asym = np.array([[0.1, 0.9], [0.8, 0.2]])
+    np.testing.assert_allclose(softmax_rows(np.log(A_bad)), A_bad)
+    r0 = np.array([1., -1.])
+    fig, ax = plt.subplots(1, 2, figsize=(9, 3))
+    s = np.linspace(0, 1, 300)
+    for d in [1, 4, 16, 64]:
+        ax[0].plot(s, 1-(1-s)**d, label=f'{d} layers')
+    ax[0].set(xlabel='Eigenvalue', ylabel='Fraction fitted'); ax[0].legend()
+    for name, mat in [('Symmetric, non-PSD', A_bad), ('Asymmetric', A_asym)]:
+        residuals = [np.linalg.norm(np.linalg.matrix_power(np.eye(2)-mat, l)@r0) for l in range(16)]
+        ax[1].semilogy(range(16), residuals, label=name)
+    ax[1].set(xlabel='Layers', ylabel='Residual norm'); ax[1].legend()
+    plt.tight_layout(); savefig('stability')
+    print('Non-PSD eigenvalues:', np.linalg.eigvals(A_bad))
+    print('Asymmetric eigenvalues:', np.linalg.eigvals(A_asym))
+
+    Xi = np.array([[-1.5], [-0.4], [0.2], [1.4]])
+    yi = np.array([1.0, -0.5, 0.8, -0.2])
+    mi, ci = yi.mean(), yi-yi.mean()
+    G_small = kernel(Xi, Xi, 0.5)
+    diag = G_small.sum(axis=1)
+    A_context_small = weights(Xi, Xi, 0.5)
+    Xqi = np.linspace(-2, 2, 100)[:, None]
+    A_query_small = weights(Xqi, Xi, 0.5)
+    limit = mi + A_query_small @ np.linalg.solve(A_context_small, ci)
+    ridgeless = mi + kernel(Xqi, Xi, 0.5) @ np.linalg.solve(G_small, ci)
+    np.testing.assert_allclose(mi + A_context_small @ np.linalg.solve(A_context_small, ci), yi)
+    np.testing.assert_allclose(mi + G_small @ np.linalg.solve(G_small, ci), yi)
+    assert np.max(np.abs(limit-ridgeless)) > 0.01
+    _, ip = iterate(A_context_small, A_query_small, ci, 300)
+    np.testing.assert_allclose(mi+ip[-1], limit, atol=1e-10)
+    print('Condition number:', np.linalg.cond(G_small))
+    print('Largest query difference:', np.max(np.abs(limit-ridgeless)))
 
     housing = {'status': 'skipped: California Housing is not cached'}
     try:

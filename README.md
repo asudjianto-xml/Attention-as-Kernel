@@ -2,23 +2,20 @@
 
 A tutorial through weighted averages for practicing data scientists, by Agus Sudjianto.
 
-An attention head computes a weighted average. Queries and keys determine the weights; values supply what is averaged. This tutorial starts with three numbers and builds a cross-attention transformer with multiple heads, output projections, skip connections, layer normalization and a feed-forward network. Kernel smoothing then explains one particular computation those layers can perform.
+An attention head computes a weighted average. Writing its exponential dot-product scores as a kernel gives exactly the same calculation. This tutorial checks that identity first, then follows the same average through changes to values, score rules, residual updates and a complete cross-attention block.
 
 [Open the notebook](attention_tutorial.ipynb)
 
 ## What you will learn
 
-1. Interpret queries, keys, values and softmax through a weighted average.
-   Build and inspect a standard cross-attention transformer block, including multi-head attention, normalization and the feed-forward network.
-2. Use Gaussian similarities to compute Nadaraya–Watson (NW) regression.
-3. Express Gaussian NW as attention, including the key bias needed for the dot-product form.
-4. Use context self-attention and query cross-attention to correct residuals across layers.
-5. Select depth using validation data and see why positive weights alone do not guarantee stable residual updates.
-6. Compare iterated NW with kernel ridge regression (KRR).
-7. Train a four-layer attention network from NW and random initializations.
-8. Check whether the trained network uses the pairing between context inputs and labels.
+1. Compute dot-product attention and a normalized kernel sum from the same queries, keys and values, and verify their equality.
+2. Hold the weights fixed while averaging labels, feature vectors or residuals.
+3. Change the score rule separately. Gaussian attention generally differs from plain dot-product attention; the code checks the required key-norm bias.
+4. Use context self-attention and query cross-attention for successive residual corrections.
+5. Put the average inside a block with multiple heads, output projections, skip connections, layer normalization and a feed-forward network.
+6. Train the restricted residual model and check its use of context labels.
 
-The kernel is the similarity rule. Normalizing its similarities gives the averaging weights. The tutorial keeps this distinction explicit.
+KRR comparisons, validation grids and spectral analysis are supporting appendices. Throughout, `Q`, `K` and `V` denote projected matrices; `A_context` and `A_query` denote normalized attention weights. A kernel supplies similarities, while normalization turns those similarities into averaging weights.
 
 ## Install
 
@@ -142,12 +139,14 @@ An independent review reproduced the earlier 250-update version to within 1e-9 i
 
 ## Two architectures in the notebook
 
-`CrossAttentionTransformer` demonstrates standard multi-head dot-product attention, output projections, layer normalization, feed-forward networks and skip connections. Context tokens supply keys and values; both context and new-input tokens supply queries. The code checks the averages and gradients, but does not train or benchmark this full block.
+The main sequence is weighted average → exact dot-product/kernel identity → change the values → change the score rule → residual updates → full transformer block.
 
-`SmoothingNetwork` is a restricted attention model without layer normalization or a feed-forward network. Its initial weights compute residual NW exactly. The initialization comparisons use this restricted model. They are not performance results for the standard block. Both examples are context/query models for unordered regression rows, not autoregressive language-model decoders.
+`SmoothingNetwork` stores the residual calculation in tokens. It has no layer normalization or feed-forward network, and its initial weights compute residual NW exactly. The initialization comparisons train this restricted model.
 
-## Transformer figures
+`CrossAttentionTransformer` then places the same weighted average inside standard multi-head dot-product attention, output projections, layer normalization, feed-forward networks and skip connections. Its untrained weights are used to inspect intermediate calculations, not to report prediction performance. Both examples are context/query models for unordered regression rows, not autoregressive decoders.
 
-The notebook and script generate five transformer figures: the query–key–value calculation, allowed context/query attention, a full pre-normalization block, attention weights by head and layer, and token states across layers. The numerical plots use the actual untrained standard transformer in the notebook. They explain the computation and are not evidence of fitted prediction quality. The figures are saved under `figures/` inside the configured output directory.
+## Figures
 
-The notebook includes the executed figures, so they can be viewed on GitHub without running Python. Re-running the cells regenerates them from the model.
+The first figure computes the same weights and outputs as dot-product attention and as a normalized exponential-kernel sum. A regression plot then shows what happens when only the score rule is changed to Gaussian similarity and the values are labels. The full-block figures expose query/key/value projections, the context/query mask, skip connections, weights across heads and layers, and token states. The full-block numerical figures use untrained weights and do not establish prediction quality.
+
+The public notebook includes executed plots for viewing on GitHub. Running it regenerates the figures from the code. Figures are saved under `figures/` inside the configured output directory.
