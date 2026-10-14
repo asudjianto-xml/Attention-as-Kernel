@@ -1,6 +1,6 @@
 # Attention as a Weighted Average
 
-A kernel tutorial for practicing data scientists, by Agus Sudjianto and Ming Yuan.
+A kernel tutorial for practicing data scientists, by Agus Sudjianto.
 
 An attention head computes a weighted average. Queries and keys determine the weights; values supply what is averaged. This tutorial starts with three numbers and follows that calculation through kernel regression, residual corrections, and a small trainable attention network.
 
@@ -128,3 +128,7 @@ Query labels never enter prediction tokens. Preprocessing and context centering 
 | `requirements.txt` | Python dependencies |
 
 Generated results, datasets, papers, and LaTeX sources are not included. Package versions and elapsed runtime are recorded in each run's `results.json`. Dependency versions are not locked; small numerical differences between environments are possible. The tutorial was tested with NumPy 2.4.6, PyTorch 2.12.0 (CPU execution), Matplotlib 3.11.1, and scikit-learn 1.9.0.
+
+## Theoretical paper
+
+For the detailed theory, see Agus Sudjianto and Ming Yuan, *[Multilayer Cross-Attention as Iterated Kernel Smoothing](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=7611539)* (2026), SSRN working paper 7611539. The tutorial is authored by Agus Sudjianto.
