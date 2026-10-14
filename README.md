@@ -1,14 +1,15 @@
-# Attention as a Weighted Average
+# Understanding Cross-Attention Transformers
 
-A kernel tutorial for practicing data scientists, by Agus Sudjianto.
+A tutorial through weighted averages for practicing data scientists, by Agus Sudjianto.
 
-An attention head computes a weighted average. Queries and keys determine the weights; values supply what is averaged. This tutorial starts with three numbers and follows that calculation through kernel regression, residual corrections, and a small trainable attention network.
+An attention head computes a weighted average. Queries and keys determine the weights; values supply what is averaged. This tutorial starts with three numbers and builds a cross-attention transformer with multiple heads, output projections, skip connections, layer normalization and a feed-forward network. Kernel smoothing then explains one particular computation those layers can perform.
 
 [Open the notebook](attention_tutorial.ipynb)
 
 ## What you will learn
 
-1. Interpret queries, keys, values, and softmax through a weighted average.
+1. Interpret queries, keys, values and softmax through a weighted average.
+   Build and inspect a standard cross-attention transformer block, including multi-head attention, normalization and the feed-forward network.
 2. Use Gaussian similarities to compute Nadaraya–Watson (NW) regression.
 3. Express Gaussian NW as attention, including the key bias needed for the dot-product form.
 4. Use context self-attention and query cross-attention to correct residuals across layers.
@@ -138,3 +139,9 @@ For the detailed theory, see Agus Sudjianto and Ming Yuan, *[Multilayer Cross-At
 The revised examples search synthetic depths through 1,024 and housing depths through 256, with wider bandwidth grids. Every selected setting at a grid boundary is recorded in `results.json`. Training compares validation-selected checkpoints at 250 and 1,000 updates along the same trajectories. The wider housing search selects an iterated-NW fit with worse test error than one-layer NW; the tutorial reports this result rather than assuming residual correction always helps.
 
 An independent review reproduced the earlier 250-update version to within 1e-9 in spark-venv with NumPy 2.2.6 and PyTorch 2.10. That cross-version check applies to the earlier run; the revised results record their own package versions in `results.json`.
+
+## Two architectures in the notebook
+
+`CrossAttentionTransformer` demonstrates standard multi-head dot-product attention, output projections, layer normalization, feed-forward networks and skip connections. Context tokens supply keys and values; both context and new-input tokens supply queries. The code checks the averages and gradients, but does not train or benchmark this full block.
+
+`SmoothingNetwork` is a restricted attention model without layer normalization or a feed-forward network. Its initial weights compute residual NW exactly. The initialization comparisons use this restricted model. They are not performance results for the standard block. Both examples are context/query models for unordered regression rows, not autoregressive language-model decoders.

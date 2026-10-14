@@ -1,7 +1,6 @@
-"""Run the Attention as a Weighted Average tutorial on the CPU.
+"""Run the cross-attention transformer tutorial on the CPU.
 
-This script contains the notebook's code cells in their execution order.
-Outputs default to ./outputs; see README.md for environment settings.
+Code cells match the notebook. Outputs default to ./outputs.
 """
 import matplotlib
 matplotlib.use("Agg")
@@ -54,6 +53,89 @@ def main():
     print('Weights:', attention_weights)
     print('Weighted label average:', attention_weights @ values)
     print('Same weights, different values:', attention_weights @ np.array([1., -2., 3.]))
+
+    class CrossAttentionBlock(nn.Module):
+        def __init__(self, width=8, heads=2):
+            super().__init__()
+            assert width % heads == 0
+            self.heads, self.head_width = heads, width // heads
+            self.norm_attention = nn.LayerNorm(width)
+            self.q_map = nn.Linear(width, width)
+            self.k_map = nn.Linear(width, width)
+            self.v_map = nn.Linear(width, width)
+            self.output_map = nn.Linear(width, width)
+            self.norm_ffn = nn.LayerNorm(width)
+            self.ffn = nn.Sequential(nn.Linear(width, 2*width), nn.GELU(), nn.Linear(2*width, width))
+
+        def split_heads(self, tensor):
+            batch, tokens, _ = tensor.shape
+            return tensor.reshape(batch, tokens, self.heads, self.head_width).transpose(1, 2)
+
+        def forward(self, tokens, context_size):
+            normalized = self.norm_attention(tokens)
+            context = normalized[:, :context_size]
+            queries = self.split_heads(self.q_map(normalized))
+            keys = self.split_heads(self.k_map(context))
+            values = self.split_heads(self.v_map(context))
+            scores = queries @ keys.transpose(-2, -1) / self.head_width**0.5
+            attention = scores.softmax(dim=-1)
+            head_output = attention @ values
+            combined = head_output.transpose(1, 2).reshape_as(tokens)
+            tokens = tokens + self.output_map(combined)
+            tokens = tokens + self.ffn(self.norm_ffn(tokens))
+            return tokens, attention, values, head_output
+
+    class CrossAttentionTransformer(nn.Module):
+        def __init__(self, width=8, heads=2, depth=2):
+            super().__init__()
+            self.embedding = nn.Linear(3, width)
+            self.blocks = nn.ModuleList([CrossAttentionBlock(width, heads) for _ in range(depth)])
+            self.readout = nn.Linear(width, 1)
+
+        def forward(self, context_inputs, context_labels, query_inputs):
+            mean = context_labels.mean(dim=1, keepdim=True)
+            context = torch.stack([context_inputs, context_labels-mean, torch.ones_like(context_inputs)], -1)
+            query = torch.stack([query_inputs, torch.zeros_like(query_inputs), torch.zeros_like(query_inputs)], -1)
+            tokens = self.embedding(torch.cat([context, query], dim=1))
+            context_size = context.shape[1]
+            details = []
+            for block in self.blocks:
+                tokens, attention, values, head_output = block(tokens, context_size)
+                details.append((attention, values, head_output))
+            prediction = mean + self.readout(tokens[:, context_size:]).squeeze(-1)
+            return prediction, details
+
+    # Keep this illustration's random initialization separate from later experiments.
+    with torch.random.fork_rng():
+        torch.manual_seed(77)
+        standard_transformer = CrossAttentionTransformer()
+        cx = torch.tensor([[-1., 0., 1.]])
+        cy = torch.tensor([[10., 20., 40.]])
+        qx = torch.tensor([[-0.5, 0.5]])
+        with torch.no_grad():
+            prediction, details = standard_transformer(cx, cy, qx)
+            assert prediction.shape == (1, 2)
+            for attention, values, head_output in details:
+                torch.testing.assert_close(attention.sum(-1), torch.ones_like(attention.sum(-1)))
+                # First new query, first head: explicitly add its three weighted vectors.
+                manual = sum(attention[0, 0, 3, i]*values[0, 0, i] for i in range(3))
+                torch.testing.assert_close(manual, head_output[0, 0, 3])
+            perm = torch.tensor([2, 0, 1])
+            reordered, _ = standard_transformer(cx[:, perm], cy[:, perm], qx)
+            alone, _ = standard_transformer(cx, cy, qx[:, :1])
+            torch.testing.assert_close(reordered, prediction, atol=1e-12, rtol=1e-12)
+            torch.testing.assert_close(alone, prediction[:, :1], atol=1e-12, rtol=1e-12)
+        # Check that both attention projections and the feed-forward block can learn.
+        standard_transformer.zero_grad()
+        standard_transformer(cx, cy, qx)[0].square().mean().backward()
+        for block in standard_transformer.blocks:
+            for parameter in [block.q_map.weight, block.k_map.weight, block.v_map.weight,
+                              block.output_map.weight, block.ffn[0].weight]:
+                assert parameter.grad is not None and torch.isfinite(parameter.grad).all()
+                assert parameter.grad.abs().sum() > 0
+        print('First layer: weights for new queries (heads x queries x context rows):')
+        print(details[0][0][0, :, 3:].numpy().round(3))
+        print('Standard block: weighted averages, invariance and gradient checks passed.')
 
     rng = np.random.default_rng(17)
     def truth(x):
