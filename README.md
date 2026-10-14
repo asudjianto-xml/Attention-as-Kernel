@@ -4,7 +4,7 @@ A tutorial through weighted averages for practicing data scientists, by Agus Sud
 
 An attention head computes a weighted average. Writing its exponential dot-product scores as a kernel gives exactly the same calculation. This tutorial checks that identity first, then follows the same average through changes to values, score rules, residual updates and a complete cross-attention block.
 
-[Open the notebook](attention_tutorial.ipynb)
+[Open the executed notebook](attention_tutorial.ipynb) to read the explanations and view the figures, or follow the instructions below to run it yourself.
 
 ## What you will learn
 
@@ -16,6 +16,21 @@ An attention head computes a weighted average. Writing its exponential dot-produ
 6. Train the restricted residual model and check its use of context labels.
 
 KRR comparisons, validation grids and spectral analysis are supporting appendices. Throughout, `Q`, `K` and `V` denote projected matrices; `A_context` and `A_query` denote normalized attention weights. A kernel supplies similarities, while normalization turns those similarities into averaging weights.
+
+## How attention connects to kernel smoothing
+
+For one query, dot-product attention assigns each key a score and averages its value:
+
+$$
+a_i = \frac{\exp(q^\top k_i/\sqrt{d_k})}{\sum_j \exp(q^\top k_j/\sqrt{d_k})},
+\qquad o = \sum_i a_i v_i.
+$$
+
+Calling the numerator $\kappa(q,k_i)$ writes the same calculation as a normalized kernel sum. No Gaussian kernel is needed for this identity. If the values are observed labels, this is Nadaraya–Watson regression with the exponential dot-product similarity. Vector values give a weighted average of vectors.
+
+Gaussian scores, $-\|q-k_i\|^2/T$, are introduced later as another choice. At $T=2\sqrt{d_k}$, their weights equal those of scaled dot-product scores with an added key bias, $-\|k_i\|^2/(2\sqrt{d_k})$. Plain dot-product scores generally give different weights; the bias cancels when all keys have the same norm.
+
+The notebook changes the values and the score rule in separate steps. It then uses residual values to explain repeated corrections before showing the average inside a complete cross-attention transformer block. A full transformer learns its scores and values; its layers do not automatically implement residual Nadaraya–Watson updates.
 
 ## Install
 
@@ -110,7 +125,7 @@ For a custom data cache, populate that same directory explicitly with `fetch_cal
 
 ## What the experiments establish
 
-The notebook checks that Gaussian scores and biased dot-product scores give the same weights, that the token network matches iterated NW before training, and that context reordering and query batching preserve predictions. It also constructs an example where positive attention weights produce diverging residuals.
+The notebook first checks that dot-product softmax and the normalized exponential kernel give identical weights and outputs. It then checks that Gaussian scores and biased dot-product scores give the same weights, that the token network matches iterated NW before training, and that context reordering and query batching preserve predictions. It also constructs an example where positive attention weights produce diverging residuals.
 
 The training comparison uses three seeds, the same episodes and optimizer for each initialization, and validation-selected checkpoints. Test functions have new coefficients from the same family used in training. This is a teaching experiment, not evidence of transfer to an unseen function family. The optional housing example is a small random split, not a spatial generalization study.
 
@@ -147,6 +162,6 @@ The main sequence is weighted average → exact dot-product/kernel identity → 
 
 ## Figures
 
-The first figure computes the same weights and outputs as dot-product attention and as a normalized exponential-kernel sum. A regression plot then shows what happens when only the score rule is changed to Gaussian similarity and the values are labels. The full-block figures expose query/key/value projections, the context/query mask, skip connections, weights across heads and layers, and token states. The full-block numerical figures use untrained weights and do not establish prediction quality.
+The first figure computes the same weights and outputs as dot-product attention and as a normalized exponential-kernel sum. A separate numerical check holds queries, keys and values fixed while comparing dot-product and Gaussian scores. The regression figure then uses Gaussian similarity with label values to show how the weights produce a prediction. The full-block figures expose query/key/value projections, the context/query mask, skip connections, weights across heads and layers, and token states. The full-block numerical figures use untrained weights and do not establish prediction quality.
 
 The public notebook includes executed plots for viewing on GitHub. Running it regenerates the figures from the code. Figures are saved under `figures/` inside the configured output directory.
